@@ -19,10 +19,10 @@ const FS = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
 uniform sampler2DArray T;
-uniform int n, mode, cols, ref, solo, ord[8];
+uniform int n, mode, cols, ref, solo, hot, ord[8];
 uniform vec2 res, tile, img, mouse;
 uniform vec3 view;
-uniform float gap, tol, tint;
+uniform float gap, tol, tint, dpr;
 out vec4 o;
 const vec3 BG = vec3(.059, .059, .063), WELL = vec3(.075, .075, .08), AC = vec3(.85, .42, .44);
 
@@ -37,6 +37,12 @@ void main() {
   vec2 uv = (p - view.xy) / view.z / img;
   o = vec4(BG, 1);
   if (k >= n || c.x >= cols || any(lessThan(p, vec2(0))) || any(greaterThan(p, tile - gap))) return;
+  // Tile frames: accent for the reference, soft white for the hovered or dragged chip.
+  vec2 e2 = min(p, tile - gap - p);
+  if (mode == 0 && min(e2.x, e2.y) < dpr && (ord[k] == ref || k == hot)) {
+    o = vec4(k == hot ? vec3(.62) : AC, 1);
+    return;
+  }
   o = vec4(WELL, 1);
   if (any(lessThan(uv, vec2(0))) || any(greaterThanEqual(uv, vec2(1)))) return;
 
@@ -90,7 +96,10 @@ const u = (name: string) => (locs[name] ??= gl.getUniformLocation(prog, name));
 const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })), { type: 'module' });
 
 type Stat = { p: number; d: number } | null;
-let W = 0, H = 0, gen = 0, ref = 0, mode = 0, cols = 0, solo = -1, diffOn = true, raf = 0;
+let W = 0, H = 0, gen = 0, ref = 0, mode = 0, cols = 0, solo = -1, hot = -1, diffOn = true, raf = 0;
+let chipEls: HTMLElement[] = [], dragging = false, held: HTMLElement | null = null;
+// Hovering a chip in overlay previews that image solo.
+const shownSolo = () => (mode === 1 && hot >= 0 ? ord.indexOf(hot) : solo);
 let names: string[] = [], ord: number[] = [], stats: Stat[] = [];
 let view = { x: 0, y: 0, s: 1 }, mouse = [0, 0];
 let tex: WebGLTexture | null = null;
@@ -131,7 +140,9 @@ function render() {
   gl.uniform1i(u('mode'), mode);
   gl.uniform1i(u('cols'), g.c);
   gl.uniform1i(u('ref'), ref);
-  gl.uniform1i(u('solo'), solo);
+  gl.uniform1i(u('solo'), shownSolo());
+  gl.uniform1i(u('hot'), hot >= 0 ? ord.indexOf(hot) : -1);
+  gl.uniform1f(u('dpr'), d);
   gl.uniform1iv(u('ord'), [...ord, ...Array(MAX).fill(0)].slice(0, MAX));
   gl.uniform1f(u('tol'), +tolInput.value);
   gl.uniform1f(u('tint'), diffOn ? +tintInput.value : 0);
@@ -141,6 +152,7 @@ function render() {
 
 function labels(g: ReturnType<typeof grid>) {
   const n = ord.length;
+  const solo = shownSolo();
   let slots = ord.map((_, k) => k);
   if (mode === 2) slots = [];
   else if (mode === 1 && solo >= 0) slots = [solo];
@@ -157,15 +169,84 @@ function labels(g: ReturnType<typeof grid>) {
     .join('');
 }
 
+function makeChips() {
+  chipEls = names.map((name, l) => {
+    const el = document.createElement('span');
+    el.innerHTML = `<i></i><u></u>${esc(name)}<em></em>`;
+    el.onpointerdown = e => grab(e, l);
+    el.onpointerenter = () => !dragging && setHot(l);
+    el.onpointerleave = () => !dragging && setHot(-1);
+    return el;
+  });
+  chips.replaceChildren(...chipEls);
+  renderChips();
+}
+
+// Updates chips in place and keeps DOM order in sync with `ord`. The held chip never moves in the
+// DOM (that would drop its pointer capture); the others are placed around it.
 function renderChips() {
-  chips.innerHTML = ord
-    .map((l, k) => {
-      const s = stats[l];
-      const info = l === ref ? 'reference'
-        : s ? `${isFinite(s.p) ? s.p.toFixed(1) + ' dB' : 'identical'} · ${s.d.toFixed(2)}%` : '…';
-      return `<span draggable="true" data-k="${k}" class="${l === ref ? 'ref' : ''}">${k + 1} ${esc(names[l])}<em>${info}</em></span>`;
-    })
-    .join('');
+  const at = held ? ord.indexOf(chipEls.indexOf(held)) : -1;
+  ord.forEach((l, k) => {
+    const el = chipEls[l], s = stats[l];
+    if (el !== held) k < at ? chips.insertBefore(el, held) : chips.append(el);
+    el.classList.toggle('ref', l === ref);
+    el.querySelector('u')!.textContent = String(k + 1);
+    el.querySelector('em')!.textContent = l === ref ? 'reference'
+      : s ? `${isFinite(s.p) ? s.p.toFixed(1) + ' dB' : 'identical'} · ${s.d.toFixed(2)}%` : '…';
+  });
+}
+
+function setHot(l: number) {
+  hot = l;
+  chipEls.forEach((c, m) => c.classList.toggle('hot', m === l));
+  draw();
+}
+
+// FLIP: move layer `l` to slot `k`, then slide the other chips from where they were.
+function move(l: number, k: number) {
+  const others = chipEls.filter((_, m) => m !== l);
+  const first = others.map(c => c.getBoundingClientRect());
+  ord.splice(k, 0, ord.splice(ord.indexOf(l), 1)[0]);
+  renderChips();
+  others.forEach((c, i) => {
+    c.style.transition = 'none';
+    c.style.transform = '';
+    const b = c.getBoundingClientRect();
+    c.style.transform = `translate(${first[i].left - b.left}px,${first[i].top - b.top}px)`;
+  });
+  chips.offsetWidth;
+  others.forEach(c => ((c.style.transition = ''), (c.style.transform = '')));
+  draw();
+}
+
+// Press and release sets the reference; press and drag lifts the chip and reorders live.
+function grab(e: PointerEvent, l: number) {
+  const el = chipEls[l], r = el.getBoundingClientRect(), x0 = e.clientX, y0 = e.clientY;
+  const dx = x0 - r.left, dy = y0 - r.top;
+  held = el;
+  el.setPointerCapture(e.pointerId);
+  el.onpointermove = e => {
+    if (!dragging && Math.hypot(e.clientX - x0, e.clientY - y0) < 4) return;
+    dragging = true;
+    el.classList.add('lift');
+    const f = chips.getBoundingClientRect();
+    let best = ord.indexOf(l), bd = Infinity;
+    ord.forEach((m, k) => {
+      const c = chipEls[m];
+      const d = Math.hypot(f.left + c.offsetLeft + c.offsetWidth / 2 - e.clientX, f.top + c.offsetTop + c.offsetHeight / 2 - e.clientY);
+      if (d < bd) (bd = d), (best = k);
+    });
+    if (best !== ord.indexOf(l)) move(l, best);
+    el.style.transform = `translate(${e.clientX - dx - f.left - el.offsetLeft}px,${e.clientY - dy - f.top - el.offsetTop}px) scale(1.04)`;
+  };
+  el.onpointerup = el.onpointercancel = el.onlostpointercapture = () => {
+    el.onpointermove = el.onpointerup = el.onpointercancel = el.onlostpointercapture = null;
+    held = null;
+    if (!dragging) return (ref = l), sync();
+    dragging = false;
+    el.classList.remove('lift');
+    el.style.transform = '';
+  };
 }
 
 function sync() {
@@ -193,7 +274,8 @@ async function load(list: FileList | File[]) {
   gen++;
   names = files.map(f => f.name);
   ord = files.map((_, i) => i);
-  (ref = 0), (solo = -1), (stats = []);
+  (ref = 0), (solo = -1), (hot = -1), (stats = []);
+  makeChips();
   $('#empty').hidden = true;
   if (tex) gl.deleteTexture(tex);
   tex = gl.createTexture();
@@ -261,28 +343,27 @@ ondrop = e => {
   if (e.dataTransfer?.files.length) load(e.dataTransfer.files);
 };
 
-// Chips: click sets the reference, drag reorders tiles and wedges.
-let dragK = -1;
-const chipK = (e: Event) => (e.target as HTMLElement).closest('span')?.dataset.k;
-chips.onclick = e => {
-  const k = chipK(e);
-  if (k != null) (ref = ord[+k]), sync();
+// Slot under the pointer: the tile in tile view, the solo image in overlay.
+function slotAt(e: MouseEvent) {
+  const r = cv.getBoundingClientRect(), g = grid();
+  if (mode === 1) return solo;
+  if (mode !== 0) return -1;
+  const c = Math.floor((e.clientX - r.left) / g.w), k = Math.floor((e.clientY - r.top) / g.h) * g.c + c;
+  return c < g.c && k < ord.length ? k : -1;
+}
+cv.ondblclick = e => {
+  const k = slotAt(e);
+  if (k >= 0) (ref = ord[k]), sync();
 };
-chips.ondragstart = e => (dragK = +(chipK(e) ?? -1));
-chips.ondrop = e => {
-  const k = chipK(e);
-  if (dragK < 0 || k == null) return;
-  e.preventDefault();
-  e.stopPropagation();
-  ord.splice(+k, 0, ord.splice(dragK, 1)[0]);
-  dragK = -1;
-  renderChips();
-  draw();
-};
+cv.onpointerleave = () => chipEls.forEach(c => c.classList.remove('hot'));
 
 const track = (e: PointerEvent) => {
   const r = cv.getBoundingClientRect();
   mouse = [e.clientX - r.left, e.clientY - r.top];
+  if (mode === 0) {
+    const k = slotAt(e);
+    chipEls.forEach((c, m) => c.classList.toggle('hot', ord[k] === m));
+  }
   if (mode === 1) draw();
 };
 cv.onpointermove = track;
