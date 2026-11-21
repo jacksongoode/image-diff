@@ -162,14 +162,16 @@ function labels(g: ReturnType<typeof grid>) {
 
 function renderChips() {
   if (dragged) return;
+  const f = [...chips.children].indexOf(document.activeElement!);
   chips.innerHTML = ord
     .map((l, k) => {
       const s = stats[l];
       const info = l === ref ? 'reference'
         : s ? `${isFinite(s.p) ? s.p.toFixed(1) + ' dB' : 'identical'} · ${s.d.toFixed(2)}%` : '…';
-      return `<span draggable="true" data-k="${k}" class="${l === ref ? 'ref' : ''}"><i></i><u>${k + 1}</u>${esc(names[l])}<em>${info}</em></span>`;
+      return `<span draggable="true" data-k="${k}" role="button" tabindex="0" aria-pressed="${l === ref}"><i></i><u>${k + 1}</u>${esc(names[l])}<em>${info}</em></span>`;
     })
     .join('');
+  (chips.children[f] as HTMLElement | undefined)?.focus();
 }
 
 // Chips: click sets the reference; drag slides chips live and commits the order on release.
@@ -178,6 +180,16 @@ const chipK = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>('#chi
 chips.onclick = e => {
   const k = chipK(e);
   if (k) (ref = ord[+k]), sync();
+};
+// Keyboard: enter/space sets the reference, alt+arrows move the chip.
+chips.onkeydown = e => {
+  const k = +(chipK(e) ?? -1), j = k + (e.altKey ? ({ ArrowLeft: -1, ArrowRight: 1 } as any)[e.key] ?? 0 : 0);
+  if (k < 0) return;
+  if (e.key === 'Enter' || e.key === ' ') (ref = ord[k]), sync();
+  else if (j !== k && j >= 0 && j < ord.length) ([ord[k], ord[j]] = [ord[j], ord[k]]), renderChips(), draw();
+  else return;
+  e.preventDefault();
+  (chips.children[j] as HTMLElement).focus();
 };
 chips.ondragstart = e => {
   dragged = e.target as HTMLElement;
@@ -254,8 +266,8 @@ async function load(list: FileList | File[]) {
 
 function setMode(m: number) {
   mode = m;
-  document.querySelectorAll<HTMLElement>('#modes a').forEach(a => a.classList.toggle('on', +a.dataset.m! === m));
-  $('#colc').classList.toggle('off', m !== 0);
+  document.querySelectorAll<HTMLElement>('#modes button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.m! === m)));
+  $('#colc').inert = m !== 0;
   if (ord.length) fit();
 }
 
@@ -267,7 +279,7 @@ function setCols(c: number) {
 
 function toggleDiff() {
   diffOn = !diffOn;
-  $('#dt').classList.toggle('on', diffOn);
+  $('#dt').setAttribute('aria-pressed', String(diffOn));
   draw();
 }
 

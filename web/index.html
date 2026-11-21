@@ -1,4 +1,5 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>image diff</title>
@@ -7,45 +8,48 @@
   body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 12px/1.4 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: .01em; -webkit-font-smoothing: antialiased; }
   header, footer { display: flex; gap: 22px; align-items: center; padding: 16px 22px; flex-wrap: wrap; }
   footer { gap: 8px; min-height: 30px; }
-  a, label { cursor: pointer; user-select: none; transition: color .25s, border-color .25s, opacity .25s; }
-  a:hover, label:hover, .on { color: var(--hi); }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; }
+  button, label { cursor: pointer; user-select: none; transition: color .25s, border-color .25s, opacity .25s; }
+  button:hover, label:hover, [aria-pressed=true] { color: var(--hi); }
+  :focus-visible, label:has(#fi:focus-visible) { outline: 1px solid var(--ac); outline-offset: 3px; }
+  #fi { position: absolute; opacity: 0; width: 0; }
   header i { font-style: normal; color: var(--hi); margin-right: auto; }
   nav { display: flex; gap: 14px; }
   b { font-weight: 400; color: var(--hi); display: inline-block; min-width: 4ch; text-align: center; }
   input[type=range] { width: 84px; accent-color: var(--ac); vertical-align: middle; }
-  #colc a { padding: 0 4px; }
-  .off { opacity: .25; pointer-events: none; }
+  #colc button { padding: 0 4px; }
+  [inert] { opacity: .25; }
   main { flex: 1; position: relative; margin: 0 14px; min-height: 0; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   #lab div { position: absolute; pointer-events: none; color: var(--hi); opacity: .75; padding: 8px 10px; font-size: 11px; text-shadow: 0 0 8px #000; white-space: nowrap; }
   #empty { position: absolute; inset: 8px; margin: 0; display: grid; place-content: center; text-align: center; border: 1px dashed var(--ln); line-height: 2; pointer-events: none; }
   #empty[hidden] { display: none; }
-  #empty small { color: #55544f; }
+  #empty small { color: #807f79; }
   #chips { display: flex; flex-wrap: wrap; gap: 8px; }
   #chips span { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 9px; border: 1px solid var(--ln); cursor: grab; user-select: none; transition: color .25s, border-color .25s; }
   #chips span:hover { color: var(--hi); border-color: #3b3b3e; }
   #chips span.ghost { opacity: .3; }
-  #chips span.ref { border-color: var(--ac); color: var(--hi); }
-  #chips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid #4a4944; transition: background .25s, border-color .25s, transform .25s; }
+  #chips span[aria-pressed=true] { border-color: var(--ac); color: var(--hi); }
+  #chips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid #807f79; transition: background .25s, border-color .25s, transform .25s; }
   #chips span:hover i { border-color: var(--ac); }
-  #chips .ref i { background: var(--ac); border-color: var(--ac); transform: scale(1.15); }
-  #chips u { text-decoration: none; color: #5c5b56; font-variant-numeric: tabular-nums; }
-  #chips em { font-style: normal; color: #5c5b56; }
-  footer small { margin-left: auto; color: #4a4944; }
+  #chips [aria-pressed=true] i { background: var(--ac); border-color: var(--ac); transform: scale(1.15); }
+  #chips u { text-decoration: none; color: #807f79; font-variant-numeric: tabular-nums; }
+  #chips em { font-style: normal; color: #807f79; }
+  footer small { margin-left: auto; color: #807f79; }
 </style>
 <header>
   <i>image diff</i>
-  <nav id="modes"><a data-m="0" class="on">tile</a><a data-m="1">overlay</a><a data-m="2">spread</a></nav>
-  <span id="colc">cols <a id="cm">−</a><b id="cn">auto</b><a id="cp">+</a></span>
-  <a id="dt" class="on">diff</a>
+  <nav id="modes" aria-label="view"><button data-m="0" aria-pressed="true">tile</button><button data-m="1" aria-pressed="false">overlay</button><button data-m="2" aria-pressed="false">spread</button></nav>
+  <span id="colc">cols <button id="cm" aria-label="fewer columns">−</button><b id="cn" aria-live="polite">auto</b><button id="cp" aria-label="more columns">+</button></span>
+  <button id="dt" aria-pressed="true">diff</button>
   <label>tolerance <input type="range" id="tol" min="1" max="441" value="8"> <b id="tv">8</b></label>
   <label>tint <input type="range" id="al" min="0" max="1" step=".05" value=".75"></label>
-  <label>add images<input type="file" id="fi" multiple accept="image/*" hidden></label>
+  <label>add images<input type="file" id="fi" multiple accept="image/*"></label>
 </header>
 <main>
-  <canvas id="c"></canvas>
+  <canvas id="c" role="img" aria-label="image comparison"></canvas>
   <div id="lab"></div>
   <p id="empty">drop up to eight images<br><small>drag to pan · scroll to zoom · 1–8 solo · t o s views · f fit · d diff</small></p>
 </main>
-<footer><div id="chips"></div><small>click a chip to set reference · drag to reorder</small></footer>
+<footer><div id="chips" role="group" aria-label="images"></div><small>click or enter sets reference · drag or alt+←/→ reorders</small></footer>
 <script type="module" src="main.ts"></script>
