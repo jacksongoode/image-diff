@@ -345,3 +345,4 @@ onkeydown = e => {
   else return;
   draw();
 };
+draw();

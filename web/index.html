@@ -20,11 +20,11 @@
   #colc button { padding: 0 4px; }
   [inert] { opacity: .25; }
   main { flex: 1; position: relative; margin: 0 14px; min-height: 0; }
-  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas { background: var(--bg); position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   #lab div { position: absolute; pointer-events: none; color: var(--hi); opacity: .75; padding: 8px 10px; font-size: 11px; text-shadow: 0 0 8px #000; white-space: nowrap; }
-  #empty { position: absolute; inset: 8px; margin: 0; display: grid; place-content: center; text-align: center; border: 1px dashed var(--ln); line-height: 2; pointer-events: none; }
+  #empty { position: absolute; inset: 8px; margin: 0; display: grid; place-content: center; text-align: center; border: 1px dashed var(--ln); cursor: pointer; transition: color .25s, border-color .25s; }
+  #empty:hover { color: var(--hi); border-color: #3b3b3e; }
   #empty[hidden] { display: none; }
-  #empty small { color: #807f79; }
   #chips { display: flex; flex-wrap: wrap; gap: 8px; }
   #chips span { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 9px; border: 1px solid var(--ln); cursor: grab; user-select: none; transition: color .25s, border-color .25s; }
   #chips span:hover { color: var(--hi); border-color: #3b3b3e; }
@@ -35,7 +35,6 @@
   #chips [aria-pressed=true] i { background: var(--ac); border-color: var(--ac); transform: scale(1.15); }
   #chips u { text-decoration: none; color: #807f79; font-variant-numeric: tabular-nums; }
   #chips em { font-style: normal; color: #807f79; }
-  footer small { margin-left: auto; color: #807f79; }
 </style>
 <header>
   <i>image diff</i>
@@ -49,7 +48,7 @@
 <main>
   <canvas id="c" role="img" aria-label="image comparison"></canvas>
   <div id="lab"></div>
-  <p id="empty">drop up to eight images<br><small>drag to pan · scroll to zoom · 1–8 solo · t o s views · f fit · d diff</small></p>
+  <label id="empty" for="fi">Drop or choose images</label>
 </main>
-<footer><div id="chips" role="group" aria-label="images"></div><small>click or enter sets reference · drag or alt+←/→ reorders</small></footer>
+<footer><div id="chips" role="group" aria-label="images"></div></footer>
 <script type="module" src="main.ts"></script>
