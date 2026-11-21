@@ -21,10 +21,9 @@
   #empty { position: absolute; inset: 8px; margin: 0; display: grid; place-content: center; text-align: center; border: 1px dashed var(--ln); line-height: 2; pointer-events: none; }
   #empty[hidden] { display: none; }
   #empty small { color: #55544f; }
-  #chips { position: relative; display: flex; flex-wrap: wrap; gap: 8px; }
-  #chips span { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 9px; border: 1px solid var(--ln); background: var(--bg); cursor: grab; touch-action: none; transition: transform .3s cubic-bezier(.2, .8, .2, 1), color .25s, border-color .25s, box-shadow .25s; }
-  #chips span:hover, #chips span.hot { color: var(--hi); border-color: #3b3b3e; }
-  #chips span.lift { position: relative; z-index: 1; cursor: grabbing; color: var(--hi); border-color: #4a4a4e; box-shadow: 0 12px 32px #000d; transition: color .25s, border-color .25s, box-shadow .25s; }
+  #chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  #chips span { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 9px; border: 1px solid var(--ln); cursor: grab; user-select: none; transition: color .25s, border-color .25s; }
+  #chips span:hover { color: var(--hi); border-color: #3b3b3e; }
   #chips span.ref { border-color: var(--ac); color: var(--hi); }
   #chips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid #4a4944; transition: background .25s, border-color .25s, transform .25s; }
   #chips span:hover i { border-color: var(--ac); }
@@ -47,5 +46,5 @@
   <div id="lab"></div>
   <p id="empty">drop up to eight images<br><small>drag to pan · scroll to zoom · 1–8 solo · t o s views · f fit · d diff</small></p>
 </main>
-<footer><div id="chips"></div><small>click a chip to set reference · drag to reorder · double-click a tile</small></footer>
+<footer><div id="chips"></div><small>click a chip to set reference · drag to reorder</small></footer>
 <script type="module" src="main.ts"></script>
