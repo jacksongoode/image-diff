@@ -161,6 +161,7 @@ function labels(g: ReturnType<typeof grid>) {
 }
 
 function renderChips() {
+  if (dragged) return;
   chips.innerHTML = ord
     .map((l, k) => {
       const s = stats[l];
@@ -171,26 +172,26 @@ function renderChips() {
     .join('');
 }
 
-// Chips: click sets the reference; drag shows an insertion bar and reorders on drop.
-let dragK = -1;
+// Chips: click sets the reference; drag slides chips live and commits the order on release.
+let dragged: HTMLElement | null = null;
 const chipK = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>('#chips span')?.dataset.k;
-const mark = (k = -1) =>
-  chips.querySelectorAll<HTMLElement>('span').forEach((c, i) => {
-    c.style.boxShadow = i === k && k !== dragK ? `${k < dragK ? -5 : 5}px 0 0 -1px var(--ac)` : '';
-  });
 chips.onclick = e => {
   const k = chipK(e);
   if (k) (ref = ord[+k]), sync();
 };
-chips.ondragstart = e => (dragK = +chipK(e)!);
-chips.ondragover = e => dragK >= 0 && mark(+(chipK(e) ?? -1));
-chips.ondragend = () => ((dragK = -1), mark());
-chips.ondrop = e => {
-  const k = chipK(e);
-  if (dragK < 0 || !k) return;
-  e.stopPropagation();
-  e.preventDefault();
-  ord.splice(+k, 0, ord.splice(dragK, 1)[0]);
+chips.ondragstart = e => {
+  dragged = e.target as HTMLElement;
+  requestAnimationFrame(() => dragged?.classList.add('ghost'));
+};
+chips.ondragover = e => {
+  const t = (e.target as HTMLElement).closest('span');
+  if (!dragged || !t || t === dragged) return;
+  const r = t.getBoundingClientRect();
+  chips.insertBefore(dragged, e.clientX > r.left + r.width / 2 ? t.nextSibling : t);
+};
+chips.ondragend = () => {
+  ord = [...chips.children].map(c => ord[+(c as HTMLElement).dataset.k!]);
+  dragged = null;
   renderChips();
   draw();
 };
