@@ -1,348 +1,470 @@
 declare const WORKER: string;
 
-const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
-const cv = $<HTMLCanvasElement>('#c');
-const lab = $('#lab');
-const chips = $('#chips');
-const tolInput = $<HTMLInputElement>('#tol');
-const tintInput = $<HTMLInputElement>('#al');
-const gl = cv.getContext('webgl2', { antialias: false, alpha: false })!;
-const GAP = 8;
-const MAX = 8;
+const MAX_IMAGES = 8;
+const GAP = 8; // CSS px between tiles
+const TILE = 0, OVERLAY = 1, SPREAD = 2;
 
-// All images live in one RGBA8 texture array; one fullscreen pass draws every view and the diff,
-// so pan/zoom/tolerance only touch on-screen pixels and never copy image data on the CPU.
-const VS = `#version 300 es
+const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector(selector) as T;
+const canvas = $<HTMLCanvasElement>('#canvas');
+const labelLayer = $('#labels');
+const chips = $('#chips');
+const toleranceInput = $<HTMLInputElement>('#tolerance');
+const tintInput = $<HTMLInputElement>('#tint');
+const fileInput = $<HTMLInputElement>('#files');
+
+// --- GPU ----------------------------------------------------------------------------------------
+// Every image is one layer of a texture array. A single fullscreen pass draws the current view and
+// the diff, so panning, zooming and moving the tolerance only touch on-screen pixels.
+
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false })!;
+
+const VERTEX = `#version 300 es
 void main() { gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 4. - 1., 0, 1); }`;
 
-const FS = `#version 300 es
+const FRAGMENT = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
-uniform sampler2DArray T;
-uniform int n, mode, cols, ref, solo, ord[8];
-uniform vec2 res, tile, img, mouse;
-uniform vec3 view;
-uniform float gap, tol, tint, dpr;
-out vec4 o;
-const vec3 BG = vec3(.059, .059, .063), WELL = vec3(.075, .075, .08), AC = vec3(.85, .42, .44);
 
-vec3 smp(int l, vec2 uv) { return texture(T, vec3(uv, l)).rgb; }
-vec3 px(int l, vec2 uv) { return texelFetch(T, ivec3(uv * img, l), 0).rgb; }
+const int TILE = ${TILE}, OVERLAY = ${OVERLAY}, SPREAD = ${SPREAD};
+const vec3 BG = vec3(.059, .059, .063), WELL = vec3(.075, .075, .08), ACCENT = vec3(.85, .42, .44);
+const float TAU = 6.2831853;
+
+uniform sampler2DArray images;
+uniform int count, mode, cols, ref, solo, order[${MAX_IMAGES}];
+uniform vec2 canvasSize, tileSize, imageSize, mouse;
+uniform vec3 view; // pan x, pan y, scale
+uniform float gap, tolerance, tint, dpr;
+out vec4 color;
+
+vec3 filtered(int layer, vec2 uv) { return texture(images, vec3(uv, layer)).rgb; }
+vec3 texel(int layer, vec2 uv) { return texelFetch(images, ivec3(uv * imageSize, layer), 0).rgb; }
 
 void main() {
-  vec2 f = vec2(gl_FragCoord.x, res.y - gl_FragCoord.y);
-  ivec2 c = mode == 0 ? ivec2(f / tile) : ivec2(0);
-  int k = c.y * cols + c.x;
-  vec2 p = f - vec2(c) * tile - gap * .5;
-  vec2 uv = (p - view.xy) / view.z / img;
-  o = vec4(BG, 1);
-  if (k >= n || c.x >= cols || any(lessThan(p, vec2(0))) || any(greaterThan(p, tile - gap))) return;
-  vec2 e2 = min(p, tile - gap - p);
-  if (mode == 0 && ord[k] == ref && min(e2.x, e2.y) < dpr) { o = vec4(AC, 1); return; }
-  o = vec4(WELL, 1);
+  vec2 frag = vec2(gl_FragCoord.x, canvasSize.y - gl_FragCoord.y);
+  ivec2 cell = mode == TILE ? ivec2(frag / tileSize) : ivec2(0);
+  int slot = cell.y * cols + cell.x;
+  vec2 inner = tileSize - gap;
+  vec2 p = frag - vec2(cell) * tileSize - gap * .5;
+
+  color = vec4(BG, 1);
+  if (slot >= count || cell.x >= cols || any(lessThan(p, vec2(0))) || any(greaterThan(p, inner))) return;
+
+  vec2 border = min(p, inner - p);
+  if (mode == TILE && order[slot] == ref && min(border.x, border.y) < dpr) {
+    color = vec4(ACCENT, 1);
+    return;
+  }
+
+  vec2 uv = (p - view.xy) / view.z / imageSize;
+  color = vec4(WELL, 1);
   if (any(lessThan(uv, vec2(0))) || any(greaterThanEqual(uv, vec2(1)))) return;
 
-  // Overlay: n angular wedges around the cursor, one image per wedge.
-  float edge = 1e9;
-  if (mode == 1) {
-    vec2 d = f - mouse;
-    float a = (atan(d.y, d.x) / 6.2831853 + .5) * float(n);
-    k = solo >= 0 ? solo : int(a) % n;
-    float fr = fract(a);
-    if (solo < 0) edge = min(fr, 1. - fr) * 6.2831853 / float(n) * length(d);
+  // Overlay: one wedge per image around the cursor. seam = distance to the nearest wedge edge.
+  float seam = 1e9;
+  if (mode == OVERLAY) {
+    if (solo >= 0) {
+      slot = solo;
+    } else {
+      vec2 d = frag - mouse;
+      float a = (atan(d.y, d.x) / TAU + .5) * float(count);
+      slot = int(a) % count;
+      seam = min(fract(a), 1. - fract(a)) * TAU / float(count) * length(d);
+    }
   }
-  int l = ord[k];
-  vec3 col = smp(l, uv);
+  int layer = order[slot];
+  vec3 rgb = filtered(layer, uv);
 
-  if (mode == 2) {
-    // Spread: per-pixel RGB range across all n images, no reference needed.
+  if (mode == SPREAD) {
+    // Per-pixel RGB range across all images, drawn as heat over a dimmed reference.
     vec3 lo = vec3(1), hi = vec3(0);
-    for (int i = 0; i < 8; i++) {
-      if (i >= n) break;
-      vec3 q = px(i, uv);
+    for (int i = 0; i < count; i++) {
+      vec3 q = texel(i, uv);
       lo = min(lo, q);
       hi = max(hi, q);
     }
-    float s = length(hi - lo) * 255.;
-    vec3 base = vec3(dot(smp(ref, uv), vec3(.299, .587, .114)) * .3);
-    vec3 heat = mix(vec3(.35, .14, .24), vec3(1., .85, .74), sqrt(min(s / 128., 1.)));
-    col = s >= tol ? mix(base, heat, max(tint, .2)) : base;
-  } else if (l != ref && tint > 0. && length(px(l, uv) - px(ref, uv)) * 255. >= tol - 1e-3) {
-    col = mix(col, AC, tint);
+    float spread = length(hi - lo) * 255.;
+    vec3 base = vec3(dot(filtered(ref, uv), vec3(.299, .587, .114)) * .3);
+    vec3 heat = mix(vec3(.35, .14, .24), vec3(1., .85, .74), sqrt(min(spread / 128., 1.)));
+    rgb = spread >= tolerance ? mix(base, heat, max(tint, .2)) : base;
+  } else if (layer != ref && tint > 0. && length(texel(layer, uv) - texel(ref, uv)) * 255. >= tolerance - 1e-3) {
+    rgb = mix(rgb, ACCENT, tint);
   }
-  if (edge < 1.) col = mix(col, vec3(1), .35 * (1. - edge));
-  o = vec4(col, 1);
+  if (seam < 1.) rgb = mix(rgb, vec3(1), .35 * (1. - seam));
+  color = vec4(rgb, 1);
 }`;
 
-function shader(type: number, src: string) {
-  const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)!);
-  return s;
+function compile(type: number, source: string) {
+  const shader = gl.createShader(type)!;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader)!);
+  return shader;
 }
-const prog = gl.createProgram()!;
-gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
-gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
-gl.linkProgram(prog);
-gl.useProgram(prog);
-const locs: Record<string, WebGLUniformLocation | null> = {};
-const u = (name: string) => (locs[name] ??= gl.getUniformLocation(prog, name));
+
+const program = gl.createProgram()!;
+gl.attachShader(program, compile(gl.VERTEX_SHADER, VERTEX));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAGMENT));
+gl.linkProgram(program);
+gl.useProgram(program);
+
+const uniforms = new Map<string, WebGLUniformLocation | null>();
+function uniform(name: string) {
+  if (!uniforms.has(name)) uniforms.set(name, gl.getUniformLocation(program, name));
+  return uniforms.get(name)!;
+}
+
+// --- State --------------------------------------------------------------------------------------
+
+type Stat = { psnr: number; percent: number } | null;
+
+let imageW = 0, imageH = 0;
+let names: string[] = [];
+let order: number[] = []; // display slot -> texture layer
+let stats: Stat[] = []; // by layer
+let ref = 0; // reference layer
+let mode = TILE;
+let cols = 0; // 0 = automatic
+let solo = -1; // slot shown alone in overlay, or -1
+let diffOn = true;
+let view = { x: 0, y: 0, s: 1 }; // shared pan/zoom inside each tile, CSS px
+let mouse = [0, 0];
+let texture: WebGLTexture | null = null;
+let gen = 0; // bumped per load so stale decodes and stats are dropped
+let frame = 0;
 
 const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })), { type: 'module' });
+worker.onmessage = ({ data }) => {
+  if (data.gen !== gen) return;
+  stats = data.stats;
+  renderChips();
+};
 
-type Stat = { p: number; d: number } | null;
-let W = 0, H = 0, gen = 0, ref = 0, mode = 0, cols = 0, solo = -1, diffOn = true, raf = 0;
-let names: string[] = [], ord: number[] = [], stats: Stat[] = [];
-let view = { x: 0, y: 0, s: 1 }, mouse = [0, 0];
-let tex: WebGLTexture | null = null;
-
-const esc = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+// --- Layout and drawing -------------------------------------------------------------------------
 
 function grid() {
-  const n = ord.length;
-  const c = mode ? 1 : Math.min(cols || Math.ceil(Math.sqrt(n)), n);
-  const r = mode ? 1 : Math.ceil(n / c);
-  return { c, w: cv.clientWidth / c, h: cv.clientHeight / r };
+  const n = order.length;
+  const c = mode === TILE ? Math.min(cols || Math.ceil(Math.sqrt(n)), n) : 1;
+  const rows = mode === TILE ? Math.ceil(n / c) : 1;
+  return { cols: c, w: canvas.clientWidth / c, h: canvas.clientHeight / rows };
 }
 
 function fit() {
-  const g = grid(), iw = g.w - GAP, ih = g.h - GAP, s = Math.min(iw / W, ih / H);
-  view = { s, x: (iw - W * s) / 2, y: (ih - H * s) / 2 };
+  const g = grid();
+  const w = g.w - GAP, h = g.h - GAP;
+  const s = Math.min(w / imageW, h / imageH);
+  view = { s, x: (w - imageW * s) / 2, y: (h - imageH * s) / 2 };
   draw();
 }
 
-const draw = () => (raf ||= requestAnimationFrame(render));
+function draw() {
+  frame ||= requestAnimationFrame(render);
+}
 
 function render() {
-  raf = 0;
-  const d = devicePixelRatio, w = Math.round(cv.clientWidth * d), h = Math.round(cv.clientHeight * d);
-  if (cv.width !== w || cv.height !== h) (cv.width = w), (cv.height = h);
+  frame = 0;
+  const dpr = devicePixelRatio;
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
   gl.viewport(0, 0, w, h);
   gl.clearColor(0.059, 0.059, 0.063, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  if (!ord.length) return;
+  if (!order.length) return;
+
   const g = grid();
-  gl.uniform2f(u('res'), w, h);
-  gl.uniform2f(u('tile'), g.w * d, g.h * d);
-  gl.uniform1f(u('gap'), GAP * d);
-  gl.uniform2f(u('img'), W, H);
-  gl.uniform3f(u('view'), view.x * d, view.y * d, view.s * d);
-  gl.uniform2f(u('mouse'), mouse[0] * d, mouse[1] * d);
-  gl.uniform1i(u('n'), ord.length);
-  gl.uniform1i(u('mode'), mode);
-  gl.uniform1i(u('cols'), g.c);
-  gl.uniform1i(u('ref'), ref);
-  gl.uniform1i(u('solo'), solo);
-  gl.uniform1f(u('dpr'), d);
-  gl.uniform1iv(u('ord'), [...ord, ...Array(MAX).fill(0)].slice(0, MAX));
-  gl.uniform1f(u('tol'), +tolInput.value);
-  gl.uniform1f(u('tint'), diffOn ? +tintInput.value : 0);
+  gl.uniform2f(uniform('canvasSize'), w, h);
+  gl.uniform2f(uniform('tileSize'), g.w * dpr, g.h * dpr);
+  gl.uniform2f(uniform('imageSize'), imageW, imageH);
+  gl.uniform2f(uniform('mouse'), mouse[0] * dpr, mouse[1] * dpr);
+  gl.uniform3f(uniform('view'), view.x * dpr, view.y * dpr, view.s * dpr);
+  gl.uniform1f(uniform('gap'), GAP * dpr);
+  gl.uniform1f(uniform('dpr'), dpr);
+  gl.uniform1i(uniform('count'), order.length);
+  gl.uniform1i(uniform('mode'), mode);
+  gl.uniform1i(uniform('cols'), g.cols);
+  gl.uniform1i(uniform('ref'), ref);
+  gl.uniform1i(uniform('solo'), solo);
+  gl.uniform1iv(uniform('order'), order);
+  gl.uniform1f(uniform('tolerance'), +toleranceInput.value);
+  gl.uniform1f(uniform('tint'), diffOn ? +tintInput.value : 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  labels(g);
+  renderLabels(g);
 }
 
-function labels(g: ReturnType<typeof grid>) {
-  const n = ord.length;
-  let slots = ord.map((_, k) => k);
-  if (mode === 2) slots = [];
-  else if (mode === 1 && solo >= 0) slots = [solo];
-  lab.innerHTML = slots
-    .map(k => {
+const escapeHtml = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+
+function renderLabels(g: ReturnType<typeof grid>) {
+  let slots = order.map((_, slot) => slot);
+  if (mode === SPREAD) slots = [];
+  if (mode === OVERLAY && solo >= 0) slots = [solo];
+
+  labelLayer.innerHTML = slots
+    .map(slot => {
       let x = GAP / 2, y = GAP / 2;
-      if (mode === 0) (x += (k % g.c) * g.w), (y += Math.floor(k / g.c) * g.h);
-      else if (solo < 0) {
-        const a = ((k + 0.5) / n - 0.5) * 2 * Math.PI;
-        (x = mouse[0] + Math.cos(a) * 110 - 30), (y = mouse[1] + Math.sin(a) * 110 - 16);
+      if (mode === TILE) {
+        x += (slot % g.cols) * g.w;
+        y += Math.floor(slot / g.cols) * g.h;
+      } else if (mode === OVERLAY && solo < 0) {
+        // Middle of the slot's wedge, matching the shader's angle mapping.
+        const angle = ((slot + 0.5) / order.length - 0.5) * 2 * Math.PI;
+        x = mouse[0] + Math.cos(angle) * 110 - 30;
+        y = mouse[1] + Math.sin(angle) * 110 - 16;
       }
-      return `<div style="left:${x}px;top:${y}px">${k + 1} ${esc(names[ord[k]])}</div>`;
+      return `<div style="left:${x}px;top:${y}px">${slot + 1} ${escapeHtml(names[order[slot]])}</div>`;
     })
     .join('');
+}
+
+// --- Chips --------------------------------------------------------------------------------------
+// Click or Enter sets the reference. Dragging moves the chip live; the order commits on release.
+// Alt+arrows move the focused chip.
+
+let dragged: HTMLElement | null = null;
+
+function chipInfo(layer: number) {
+  if (layer === ref) return 'reference';
+  const s = stats[layer];
+  if (!s) return '…';
+  const psnr = isFinite(s.psnr) ? `${s.psnr.toFixed(1)} dB` : 'identical';
+  return `${psnr} · ${s.percent.toFixed(2)}%`;
 }
 
 function renderChips() {
   if (dragged) return;
-  const f = [...chips.children].indexOf(document.activeElement!);
-  chips.innerHTML = ord
-    .map((l, k) => {
-      const s = stats[l];
-      const info = l === ref ? 'reference'
-        : s ? `${isFinite(s.p) ? s.p.toFixed(1) + ' dB' : 'identical'} · ${s.d.toFixed(2)}%` : '…';
-      return `<span draggable="true" data-k="${k}" role="button" tabindex="0" aria-pressed="${l === ref}"><i></i><u>${k + 1}</u>${esc(names[l])}<em>${info}</em></span>`;
-    })
+  const focused = [...chips.children].indexOf(document.activeElement!);
+  chips.innerHTML = order
+    .map(
+      (layer, slot) =>
+        `<span draggable="true" data-slot="${slot}" role="button" tabindex="0" aria-pressed="${layer === ref}">` +
+        `<i></i><u>${slot + 1}</u>${escapeHtml(names[layer])}<em>${chipInfo(layer)}</em></span>`,
+    )
     .join('');
-  (chips.children[f] as HTMLElement | undefined)?.focus();
+  (chips.children[focused] as HTMLElement | undefined)?.focus();
 }
 
-// Chips: click sets the reference; drag slides chips live and commits the order on release.
-let dragged: HTMLElement | null = null;
-const chipK = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>('#chips span')?.dataset.k;
+const chipSlot = (e: Event) => {
+  const chip = (e.target as HTMLElement).closest<HTMLElement>('#chips span');
+  return chip ? +chip.dataset.slot! : -1;
+};
+
 chips.onclick = e => {
-  const k = chipK(e);
-  if (k) (ref = ord[+k]), sync();
+  const slot = chipSlot(e);
+  if (slot >= 0) setRef(order[slot]);
 };
-// Keyboard: enter/space sets the reference, alt+arrows move the chip.
+
 chips.onkeydown = e => {
-  const k = +(chipK(e) ?? -1), j = k + (e.altKey ? ({ ArrowLeft: -1, ArrowRight: 1 } as any)[e.key] ?? 0 : 0);
-  if (k < 0) return;
-  if (e.key === 'Enter' || e.key === ' ') (ref = ord[k]), sync();
-  else if (j !== k && j >= 0 && j < ord.length) ([ord[k], ord[j]] = [ord[j], ord[k]]), renderChips(), draw();
-  else return;
+  const slot = chipSlot(e);
+  if (slot < 0) return;
+  const step = e.altKey ? ({ ArrowLeft: -1, ArrowRight: 1 } as Record<string, number>)[e.key] : undefined;
+  const target = slot + (step ?? 0);
+  if (e.key === 'Enter' || e.key === ' ') {
+    setRef(order[slot]);
+  } else if (step && target >= 0 && target < order.length) {
+    [order[slot], order[target]] = [order[target], order[slot]];
+    renderChips();
+    draw();
+    (chips.children[target] as HTMLElement).focus();
+  } else {
+    return;
+  }
   e.preventDefault();
-  (chips.children[j] as HTMLElement).focus();
 };
+
 chips.ondragstart = e => {
   dragged = e.target as HTMLElement;
+  // Fade after the browser has captured the drag image.
   requestAnimationFrame(() => dragged?.classList.add('ghost'));
 };
+
 chips.ondragover = e => {
-  const t = (e.target as HTMLElement).closest('span');
-  if (!dragged || !t || t === dragged) return;
-  const r = t.getBoundingClientRect();
-  chips.insertBefore(dragged, e.clientX > r.left + r.width / 2 ? t.nextSibling : t);
+  const over = (e.target as HTMLElement).closest('span');
+  if (!dragged || !over || over === dragged) return;
+  const r = over.getBoundingClientRect();
+  chips.insertBefore(dragged, e.clientX > r.left + r.width / 2 ? over.nextSibling : over);
 };
+
 chips.ondragend = () => {
-  ord = [...chips.children].map(c => ord[+(c as HTMLElement).dataset.k!]);
+  order = [...chips.children].map(chip => order[+(chip as HTMLElement).dataset.slot!]);
   dragged = null;
   renderChips();
   draw();
 };
 
-function sync() {
-  $('#tv').textContent = tolInput.value;
-  worker.postMessage({ ref, tol: +tolInput.value });
-  renderChips();
-  draw();
+// --- Loading ------------------------------------------------------------------------------------
+// Each file is decoded once, off the main thread, at the first image's size. The bitmap goes to the
+// GPU as soon as it lands and is then handed (not copied) to the worker for stats.
+
+function createTexture(layers: number) {
+  const t = gl.createTexture();
+  const target = gl.TEXTURE_2D_ARRAY;
+  gl.bindTexture(target, t);
+  gl.texStorage3D(target, Math.floor(Math.log2(Math.max(imageW, imageH))) + 1, gl.RGBA8, imageW, imageH, layers);
+  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
 }
 
-worker.onmessage = ({ data }) => {
-  if (data.gen !== gen) return;
-  stats = data.st;
-  renderChips();
-};
-
-async function load(list: FileList | File[]) {
-  const files = [...list].filter(f => f.type.startsWith('image/')).slice(0, MAX);
+async function load(list: FileList) {
+  const files = [...list].filter(f => f.type.startsWith('image/')).slice(0, MAX_IMAGES);
   if (!files.length) return;
+
   const first = await createImageBitmap(files[0]);
-  const lim = gl.getParameter(gl.MAX_TEXTURE_SIZE), k = Math.min(1, lim / first.width, lim / first.height);
-  W = Math.round(first.width * k);
-  H = Math.round(first.height * k);
+  const maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  const scale = Math.min(1, maxSize / first.width, maxSize / first.height);
+  imageW = Math.round(first.width * scale);
+  imageH = Math.round(first.height * scale);
   first.close();
 
-  gen++;
+  const myGen = ++gen;
   names = files.map(f => f.name);
-  ord = files.map((_, i) => i);
-  (ref = 0), (solo = -1), (stats = []);
+  order = files.map((_, i) => i);
+  stats = [];
+  ref = 0;
+  solo = -1;
   $('#empty').hidden = true;
-  if (tex) gl.deleteTexture(tex);
-  tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, Math.floor(Math.log2(Math.max(W, H))) + 1, gl.RGBA8, W, H, files.length);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (texture) gl.deleteTexture(texture);
+  texture = createTexture(files.length);
+  worker.postMessage({ gen, width: imageW, height: imageH, count: files.length });
   fit();
-  worker.postMessage({ files, gen, W, H });
-  sync();
+  update();
 
-  // Decode in parallel off the main thread and stream each layer straight to the GPU as it lands.
-  const g = gen, t = tex;
-  const opt: ImageBitmapOptions = { resizeWidth: W, resizeHeight: H, resizeQuality: 'high', premultiplyAlpha: 'none', colorSpaceConversion: 'none' };
+  const options: ImageBitmapOptions = {
+    resizeWidth: imageW,
+    resizeHeight: imageH,
+    resizeQuality: 'high',
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+  };
   await Promise.all(
-    files.map(async (f, i) => {
-      const b = await createImageBitmap(f, opt);
-      if (g === gen) {
-        gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
-        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, W, H, 1, gl.RGBA, gl.UNSIGNED_BYTE, b);
-        gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
-        draw();
-      }
-      b.close();
+    files.map(async (file, layer) => {
+      const bitmap = await createImageBitmap(file, options);
+      if (myGen !== gen) return bitmap.close();
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, imageW, imageH, 1, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+      draw();
+      worker.postMessage({ gen: myGen, layer, bitmap }, [bitmap]);
     }),
   );
 }
 
+// --- Controls -----------------------------------------------------------------------------------
+
+// Refreshes everything that depends on the reference or tolerance.
+function update() {
+  $('#tolerance-value').textContent = toleranceInput.value;
+  worker.postMessage({ ref, tol: +toleranceInput.value });
+  renderChips();
+  draw();
+}
+
+function setRef(layer: number) {
+  ref = layer;
+  update();
+}
+
 function setMode(m: number) {
   mode = m;
-  document.querySelectorAll<HTMLElement>('#modes button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.m! === m)));
-  $('#colc').inert = m !== 0;
-  if (ord.length) fit();
+  document.querySelectorAll<HTMLElement>('#modes button').forEach(b => {
+    b.setAttribute('aria-pressed', String(+b.dataset.mode! === m));
+  });
+  $('#cols').inert = m !== TILE;
+  if (order.length) fit();
 }
 
 function setCols(c: number) {
-  cols = Math.max(0, Math.min(MAX, c));
-  $('#cn').textContent = cols ? String(cols) : 'auto';
-  if (ord.length) fit();
+  cols = Math.max(0, Math.min(MAX_IMAGES, c));
+  $('#cols-value').textContent = cols ? String(cols) : 'auto';
+  if (order.length) fit();
 }
 
 function toggleDiff() {
   diffOn = !diffOn;
-  $('#dt').setAttribute('aria-pressed', String(diffOn));
+  $('#diff').setAttribute('aria-pressed', String(diffOn));
   draw();
 }
 
 $('#modes').onclick = e => {
-  const m = (e.target as HTMLElement).dataset.m;
+  const m = (e.target as HTMLElement).dataset.mode;
   if (m) setMode(+m);
 };
-$('#cm').onclick = () => setCols((cols || grid().c) - 1);
-$('#cp').onclick = () => setCols((cols || grid().c) + 1);
-$('#dt').onclick = toggleDiff;
-tolInput.oninput = sync;
+$('#cols-less').onclick = () => setCols((cols || grid().cols) - 1);
+$('#cols-more').onclick = () => setCols((cols || grid().cols) + 1);
+$('#diff').onclick = toggleDiff;
+toleranceInput.oninput = update;
 tintInput.oninput = draw;
-const fileInput = $<HTMLInputElement>('#fi');
 fileInput.onchange = () => load(fileInput.files!);
-onresize = () => ord.length && fit();
+
+onresize = () => order.length && fit();
 ondragover = e => e.preventDefault();
 ondrop = e => {
   e.preventDefault();
   if (e.dataTransfer?.files.length) load(e.dataTransfer.files);
 };
 
-const track = (e: PointerEvent) => {
-  const r = cv.getBoundingClientRect();
+// --- Pan and zoom -------------------------------------------------------------------------------
+
+let panFrom: { x: number; y: number } | null = null;
+
+canvas.onpointerdown = e => {
+  canvas.setPointerCapture(e.pointerId);
+  panFrom = { x: e.clientX, y: e.clientY };
+};
+canvas.onpointerup = canvas.onpointercancel = () => (panFrom = null);
+canvas.onpointermove = e => {
+  const r = canvas.getBoundingClientRect();
   mouse = [e.clientX - r.left, e.clientY - r.top];
-  if (mode === 1) draw();
+  if (panFrom) {
+    view.x += e.clientX - panFrom.x;
+    view.y += e.clientY - panFrom.y;
+    panFrom = { x: e.clientX, y: e.clientY };
+  }
+  if (panFrom || mode === OVERLAY) draw();
 };
-cv.onpointermove = track;
-cv.onpointerdown = e => {
-  cv.setPointerCapture(e.pointerId);
-  let x = e.clientX, y = e.clientY;
-  cv.onpointermove = e => {
-    track(e);
-    view.x += e.clientX - x;
-    view.y += e.clientY - y;
-    (x = e.clientX), (y = e.clientY);
-    draw();
-  };
-};
-cv.onpointerup = () => (cv.onpointermove = track);
-cv.onwheel = e => {
+
+// Zoom around the cursor's position inside its tile.
+canvas.onwheel = e => {
   e.preventDefault();
-  const r = cv.getBoundingClientRect(), g = grid();
+  const r = canvas.getBoundingClientRect(), g = grid();
   let x = e.clientX - r.left, y = e.clientY - r.top;
-  if (mode === 0) (x %= g.w), (y %= g.h);
-  (x -= GAP / 2), (y -= GAP / 2);
+  if (mode === TILE) {
+    x %= g.w;
+    y %= g.h;
+  }
+  x -= GAP / 2;
+  y -= GAP / 2;
   const k = Math.exp(-e.deltaY / 300);
-  view.x = x - (x - view.x) * k;
-  view.y = y - (y - view.y) * k;
-  view.s *= k;
+  view = { x: x - (x - view.x) * k, y: y - (y - view.y) * k, s: view.s * k };
   draw();
 };
 
+// --- Keys ---------------------------------------------------------------------------------------
+// 1–8 show one image in overlay, 0/Esc show all, t/o/s switch view, f fits, d toggles the diff.
+
+const MODE_KEYS: Record<string, number> = { t: TILE, o: OVERLAY, s: SPREAD };
+
 onkeydown = e => {
   if (e.target instanceof HTMLInputElement) return;
-  const k = e.key;
-  if (k >= '1' && k <= '8' && +k <= ord.length) {
-    solo = solo === +k - 1 ? -1 : +k - 1;
-    if (mode !== 1) setMode(1);
-  } else if (k === '0' || k === 'Escape') solo = -1;
-  else if ('tos'.includes(k)) setMode('tos'.indexOf(k));
-  else if (k === 'f') fit();
-  else if (k === 'd') toggleDiff();
-  else return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= order.length) {
+    solo = solo === n - 1 ? -1 : n - 1;
+    if (mode !== OVERLAY) setMode(OVERLAY);
+  } else if (e.key === '0' || e.key === 'Escape') {
+    solo = -1;
+  } else if (e.key in MODE_KEYS) {
+    setMode(MODE_KEYS[e.key]);
+  } else if (e.key === 'f') {
+    fit();
+  } else if (e.key === 'd') {
+    toggleDiff();
+  } else {
+    return;
+  }
   draw();
 };
+
 draw();
